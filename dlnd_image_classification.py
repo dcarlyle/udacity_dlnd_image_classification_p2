@@ -80,14 +80,30 @@ import helper
 import numpy as np
 
 # Explore the dataset
-batch_id = 2 # Possible Batch Ids: [1, 2, 3, 4, 5]
-sample_id = 0 # 0 to max is 9,999
+batch_id = 3 # Possible Batch Ids: [1, 2, 3, 4, 5]
+sample_id = 10 # 0 to max is 9,999
 helper.display_stats(cifar10_dataset_folder_path, batch_id, sample_id)
 
 
 # ## Implement Preprocess Functions
 # ### Normalize
 # In the cell below, implement the `normalize` function to take in image data, `x`, and return it as a normalized Numpy array. The values should be in the range of 0 to 1, inclusive.  The return object should be the same shape as `x`.
+
+# #Local Normalization versus local norms 
+# 'from feedback from review'
+# 
+# In neurobiology, there is a concept called **lateral inhibition**. This refers to the capacity of an excited neuron to subdue its neighbors. We basically want a significant peak so that we have a form of local maxima.
+# 
+# The normalize function normalizes image data in the range of 0 to 1, inclusive.
+# 
+# However there were minor errors which I madein my normalisation technique.
+# 
+# The normalisation I implemented was **local normalisation** i.e. it would normalise based on image specific maximums. The problem with this method is - for any image, say a dog against a brighter object - the normalised pixel values of the dog would be lower as compared to an image of the same dog photographed against a darker background, though essentially the pixel values of a dog have remained the same.
+# 
+# Instead of a local normalization we will take the maximum and minimum global values, so that irrespective of image intensities, the normalised values of an object are identical across all images.
+# 
+# 
+# 
 
 # In[4]:
 
@@ -116,8 +132,8 @@ def normalize(x):
     b = 1
     
     # being an image I will assume 0 to 255
-    color_scale_min = np.amin(x) #0
-    color_scale_max = np.amax(x) #255
+    color_scale_min = 0 # np.amin(x) 
+    color_scale_max = 255 #np.amax(x) provides only the "Local maximum" for this image, so replaced with global maximum
     
     # store old shape of tensor
     dimensions = x.shape  # <class 'tuple'>, len(x.shape) = 4 dimensions
@@ -317,6 +333,46 @@ tests.test_nn_keep_prob_inputs(neural_net_keep_prob_input)
 
 # In[9]:
 
+#ref to following article from https://github.com/tensorflow/tensorflow/issues/1122
+#ref: http://stackoverflow.com/questions/33949786/how-could-i-use-batch-normalization-in-tensorflow?answertab=votes#tab-top
+#import numpy as np
+#import tensorflow as tf
+#from tensorflow.python 
+#import control_flow_ops
+
+def batch_norm(x, n_out, phase_train, scope='bn'):
+    """
+    Batch normalization on convolutional maps.
+    Args:
+        x:           Tensor, 4D BHWD input maps
+        n_out:       integer, depth of input maps
+        phase_train: boolean tf.Varialbe, true indicates training phase
+        scope:       string, variable scope
+    Return:
+        normed:      batch-normalized maps
+    """
+    with tf.variable_scope(scope):
+        beta = tf.Variable(tf.constant(0.0, shape=[n_out]),
+                                     name='beta', trainable=True)
+        gamma = tf.Variable(tf.constant(1.0, shape=[n_out]),
+                                      name='gamma', trainable=True)
+        batch_mean, batch_var = tf.nn.moments(x, [0,1,2], name='moments')
+        ema = tf.train.ExponentialMovingAverage(decay=0.5)
+
+        def mean_var_with_update():
+            ema_apply_op = ema.apply([batch_mean, batch_var])
+            with tf.control_dependencies([ema_apply_op]):
+                return tf.identity(batch_mean), tf.identity(batch_var)
+
+        mean, var = tf.cond(phase_train,
+                            mean_var_with_update,
+                            lambda: (ema.average(batch_mean), ema.average(batch_var)))
+        normed = tf.nn.batch_normalization(x, mean, var, beta, gamma, 1e-3)
+    return normed
+
+
+# In[10]:
+
 def conv2d_maxpool(x_tensor, conv_num_outputs, conv_ksize, conv_strides, pool_ksize, pool_strides):
     """
     Apply convolution then max pooling to x_tensor
@@ -333,9 +389,6 @@ def conv2d_maxpool(x_tensor, conv_num_outputs, conv_ksize, conv_strides, pool_ks
     # and biases corresponding to that patch.
     # lesson Convolutional networks/Parameters
 
-    
-
-    
     # the dimensions are (W−F+2P)/S+1
     #image_width = x_tensor.get_shape()[2].value
     #image_height = x_tensor.get_shape()[3].value
@@ -358,6 +411,8 @@ def conv2d_maxpool(x_tensor, conv_num_outputs, conv_ksize, conv_strides, pool_ks
     filter_width = conv_ksize[0] # kernal size 2-D Tuple for the convolutional layer
     filter_height = conv_ksize[1]
     
+    '''experiment from http://cs231n.stanford.edu/slides/winter1516_lecture5.pdf slide 56'''
+
     # The shape of the filter weight is (height, width, input_depth, output_depth)
     filter_dimensions = tf.truncated_normal([filter_width, filter_height, channels, conv_num_outputs], stddev=0.01)
     filter_weights = tf.Variable(filter_dimensions, name="W")
@@ -376,12 +431,37 @@ def conv2d_maxpool(x_tensor, conv_num_outputs, conv_ksize, conv_strides, pool_ks
     # Using tf.add() doesn't work when the tensors aren't the same shape.
     conv = tf.nn.bias_add(tf.nn.conv2d(x_tensor, filter_weights, strides, padding), filter_bias)
     
+    
+    '''Experiment from pro Tip from reviewer - adding batch normalzation after conv and before maxpool'''
+    '''https://www.tensorflow.org/api_docs/python/tf/nn/batch_normalization'''
+    ''' tf.nn.batch_normalization(x, mean, variance, offset, scale, variance_epsilon, name=None)  '''
+    '''before or after ReLU :)   ducha-aiki/caffenet-benchmark  says before ReLU'''
+
+    #phase_train = tf.placeholder(tf.bool, name='phase_train')
+    
+    # normally the TensorFlow Session would be passed a dictionary but this is something not editable 
+    # in this notebook so I will set perminantly to True using the tf.bool object
+    computed_val = tf.constant(10.0)
+    constant_val = tf.constant(37.0)
+    phase_train = tf.less(computed_val, constant_val)
+    
+    conv_bn = batch_norm(conv, conv_num_outputs, phase_train)
+    
+    
+    
+    #conv_bn = conv
+    '''end experiment'''
+    
+    
+    
     # RELU layer will apply an elementwise activation function,
-    relu_layer = tf.nn.relu(conv)
+    #relu_layer = tf.nn.relu(conv)
+    relu_layer = tf.nn.relu(conv_bn)
     
     # strides=[1, 2, 2, 1] - [batch, height, width, channels]). 
     # For both ksize and strides, the batch and channel dimensions are typically set to 1.
-    new_strides = [1, pool_ksize[0], pool_ksize[1], 1]
+    new_strides = [1, pool_ksize[0], pool_ksize[1], 1]   
+    
     # performs max pooling with the ksize parameter as the size of the filter.
     max_pool = tf.nn.max_pool(relu_layer, ksize=new_strides, strides=new_strides, padding=padding)
     
@@ -399,7 +479,7 @@ tests.test_con_pool(conv2d_maxpool)
 # ### Flatten Layer
 # Implement the `flatten` function to change the dimension of `x_tensor` from a 4-D tensor to a 2-D tensor.  The output should be the shape (*Batch Size*, *Flattened Image Size*). Shortcut option: you can use classes from the [TensorFlow Layers](https://www.tensorflow.org/api_docs/python/tf/layers) or [TensorFlow Layers (contrib)](https://www.tensorflow.org/api_guides/python/contrib.layers) packages for this layer. For more of a challenge, only use other TensorFlow packages.
 
-# In[10]:
+# In[11]:
 
 def flatten(x_tensor):
     """
@@ -435,7 +515,7 @@ tests.test_flatten(flatten)
 # ### Fully-Connected Layer
 # Implement the `fully_conn` function to apply a fully connected layer to `x_tensor` with the shape (*Batch Size*, *num_outputs*). Shortcut option: you can use classes from the [TensorFlow Layers](https://www.tensorflow.org/api_docs/python/tf/layers) or [TensorFlow Layers (contrib)](https://www.tensorflow.org/api_guides/python/contrib.layers) packages for this layer. For more of a challenge, only use other TensorFlow packages.
 
-# In[11]:
+# In[12]:
 
 def fully_conn(x_tensor, num_outputs):
     """
@@ -479,7 +559,7 @@ tests.test_fully_conn(fully_conn)
 # 
 # **Note:** Activation, softmax, or cross entropy should **not** be applied to this.
 
-# In[12]:
+# In[13]:
 
 def output(x_tensor, num_outputs):
     """
@@ -529,7 +609,7 @@ tests.test_output(output)
 # * Return the output
 # * Apply [TensorFlow's Dropout](https://www.tensorflow.org/api_docs/python/tf/nn/dropout) to one or more layers in the model using `keep_prob`. 
 
-# In[13]:
+# In[14]:
 
 def conv_net(x, keep_prob):
     """
@@ -542,37 +622,39 @@ def conv_net(x, keep_prob):
     #    Play around with different number of outputs, kernel size and stride
     # Function Definition from Above:
     #    conv2d_maxpool(x_tensor, conv_num_outputs, conv_ksize, conv_strides, pool_ksize, pool_strides)
-    
-    conv_ksize = (2, 2)
-    #conv_strides = (1, 2, 2, 1)
+
+    # I think ksize should be bigger than the pool size
+    conv_ksize = (4,4) #(3,3)
     conv_strides = (1,1)
-    #pool_ksize = (2, 2)
-    pool_ksize = (4,4)
-    #pool_strides = (1, 2, 2, 1)
+    pool_ksize = (3,3)
     pool_strides = (1,1)
 
+
+    # PROBLEM....!!!!!!!!
+    # With the Print_stat we blow up if layer1 > 80 and layer2 > 96  (disable printstat and we are fine :) 
+    # might be because my implementation of conv_net is not efficient? So add a new conv layer
     
     # Layer 1 - 32*32*3 to 8*8*32
-    #print("Enter conv Layer1 shape: {}".format(x.get_shape))
-    conv_num_outputs = 128 #1024 #128 #32
+    conv_num_outputs = 32#80 #64#80 #80 #1024 #128 #32
     conv1 = conv2d_maxpool(x, conv_num_outputs, conv_ksize, conv_strides, pool_ksize, pool_strides)
     
     # Layer 2 - 8*8*32 to 2*2*64
-    #print("Layer2 shape: {}".format(conv1.get_shape))
-    conv_num_outputs = 192 #64
+    conv_num_outputs = 96#96 #70 #192 #96 #64
     conv2 = conv2d_maxpool(conv1, conv_num_outputs, conv_ksize, conv_strides, pool_ksize, pool_strides)
-    #print("Exit Layer2 shape: {}".format(conv2.get_shape))
-    
+
+    # Layer 3 - 
+    conv_num_outputs = 288#128#50 #96 #64
+    conv3 = conv2d_maxpool(conv2, conv_num_outputs, conv_ksize, conv_strides, pool_ksize, pool_strides)
     
     # We want to feed all of the nodes from the last conv layer into the first fully connected layer, 
     # but the shapes are too complicated. Flattening the layer is simply to change its shape so it 
     # is easier to work with
       
     # Fully connected layer - 2*2*64 to ?
-    flatten_layer = flatten(conv2)
-    #print("Exit Layer2 shape: {}".format(conv3.get_shape))
-    flatten_layer =  tf.nn.dropout(flatten_layer, keep_prob) 
-    #print("Exit Layer2 shape: {}".format(conv3.get_shape))
+    flatten_layer = flatten(conv3)
+
+    flatten_layer =  tf.nn.dropout(flatten_layer, keep_prob) #<---- dropout
+
     
     # TODO: Apply 1, 2, or 3 Fully Connected Layers
     #    Play around with different number of outputs
@@ -587,11 +669,11 @@ def conv_net(x, keep_prob):
 
     num_outputs = 512
     fc1 = fully_conn(flatten_layer, num_outputs)
-    fc1 = tf.nn.dropout(fc1, keep_prob)  #<---- drops the accuracy to 12.5%
+    #fc1 = tf.nn.dropout(fc1, keep_prob)  #<---- dropout
     num_outputs = 256
     fc2 = fully_conn(fc1, num_outputs)
         
-    #fc2 = tf.nn.dropout(fc2, keep_prob)  #<---- drops the accuracy to 12.5%
+    #fc2 = tf.nn.dropout(fc2, keep_prob)  #<---- dropout
     num_outputs = 128
     fc3 = fully_conn(fc2, num_outputs)
     
@@ -641,7 +723,7 @@ tests.test_conv_net(conv_net)
 # 
 # Note: Nothing needs to be returned. This function is only optimizing the neural network.
 
-# In[14]:
+# In[15]:
 
 def train_neural_network(session, optimizer, keep_probability, feature_batch, label_batch):
     """
@@ -672,9 +754,19 @@ tests.test_train_nn(train_neural_network)
 
 
 # ### Show Stats
-# Implement the function `print_stats` to print loss and validation accuracy.  Use the global variables `valid_features` and `valid_labels` to calculate validation accuracy.  Use a keep probability of `1.0` to calculate the loss and validation accuracy.
+# Implement the function `print_stats` to print loss and validation accuracy.  Use the global variables `valid_features` and `valid_labels` to calculate validation accuracy.  Use a **keep probability of `1.0`** to calculate the loss and validation accuracy.
 
-# In[15]:
+# # Feedback from review
+# Thank you for your help :) This is my second attempt, I did not implement the **Print_stats** finction correctly.
+# 
+# ### The print_stats function prints loss and validation accuracy.
+# Per the instructions, instead of printing the accuracy and loss on the training set you need to print the accuracy on the validation set.
+# 
+# In **valid_acc variable** use the global variables **valid_features** and **valid_labels** instead of **feature_batch** and **label_batch**.
+# 
+# Then retrain the network and resubmit.
+
+# In[16]:
 
 def print_stats(session, feature_batch, label_batch, cost, accuracy):
     """
@@ -688,14 +780,16 @@ def print_stats(session, feature_batch, label_batch, cost, accuracy):
     # TODO: Implement Function
     # Calculate batch loss and accuracy
     loss = session.run(cost, feed_dict={
-               x: feature_batch,
-               y: label_batch,
-               keep_prob: 1.0})
+               x: valid_features,
+               y: valid_labels,
+               keep_prob: 1})
    
+    # As per reviewer's suggestion I am going to use the global variables valid_features and valid_labels 
+    # instead of feature_batch and label_batch.
     valid_acc = session.run(accuracy, feed_dict={
-               x: feature_batch,
-               y: label_batch,
-               keep_prob: 1.0})
+               x: valid_features,
+               y: valid_labels,
+               keep_prob: 1})
    
 
     '''
@@ -723,18 +817,18 @@ def print_stats(session, feature_batch, label_batch, cost, accuracy):
 #  * ...
 # * Set `keep_probability` to the probability of keeping a node using dropout
 
-# In[18]:
+# In[17]:
 
 # TODO: Tune Parameters
 epochs = 48 # model reached repeating accuracy at around epoch 48, so stop before over fitting
-batch_size = 64 #64
-keep_probability = 0.5 #0.5
+batch_size = 1024 #1024 #64 # bigger batch size the better
+keep_probability = 0.4 #0.5
 
 
 # ### Train on a Single CIFAR-10 Batch
 # Instead of training the neural network on all the CIFAR-10 batches of data, let's use a single batch. This should save time while you iterate on the model to get a better accuracy.  Once the final validation accuracy is 50% or greater, run the model on all the data in the next section.
 
-# In[19]:
+# In[18]:
 
 """
 DON'T MODIFY ANYTHING IN THIS CELL
@@ -756,7 +850,7 @@ with tf.Session() as sess:
 # ### Fully Train the Model
 # Now that you got a good accuracy with a single CIFAR-10 batch, try it with all five batches.
 
-# In[20]:
+# In[19]:
 
 """
 DON'T MODIFY ANYTHING IN THIS CELL
@@ -790,7 +884,7 @@ with tf.Session() as sess:
 # ## Test Model
 # Test your model against the test dataset.  This will be your final accuracy. You should have an accuracy greater than 50%. If you don't, keep tweaking the model architecture and parameters.
 
-# In[21]:
+# In[20]:
 
 """
 DON'T MODIFY ANYTHING IN THIS CELL
